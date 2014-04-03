@@ -1,14 +1,124 @@
 #!/bin/bash
 
 ##
-# usage: bin/compile <build-dir> <cache-dir>
-
+# usage: bin/compile <build-dir> <cache-dir> <env-dir>
 set -e
+
+export_env_dir() {
+    env_dir=$1
+    whitelist_regex=${2:-''}
+    blacklist_regex=${3:-'^(PATH|GIT_DIR|CPATH|CPPATH|LD_PRELOAD|LIBRARY_PATH)$'}
+    if [ -d "$env_dir" ]; then
+        for e in $(ls $env_dir); do
+            echo "$e" | grep -E "$whitelist_regex" | grep -qvE "$blacklist_regex" &&
+                export "$e=$(cat $env_dir/$e)"
+            :
+        done
+    fi
+}
+
+prepare_lib_versions() {
+    for f in `find $1/lib/ $1/src/ -name '*.app.src' -type f`; do
+        sed -e "s/{vsn, git}/{vsn, \"$2\"}/" $f > /tmp/`basename $f`
+        mv /tmp/`basename $f` $f
+    done
+}
+
+install_deps() {
+    sudo apt-get -y install libpam0g-dev
+}
+
+export_env_dir $3
+
 bpdir=$(cd $(dirname $(dirname $0)); pwd)
 mkdir -p "$1" "$2"
-build=$(cd "$1/" && pwd)
+original_build=$(cd "$1/" && pwd)
+ls -la "${original_build}"
+build=$(dirname ${original_build})/exodm
 test -z ${build} && exit
 cache=$(cd "$2/" && pwd)
 test -z ${cache} && exit
+mv "${original_build}" "${build}"
+ls -la "${build}"
+DEFAULT_OTP_VERSION="master"
+if [ -f ${build}/.preferred_otp_version ]; then
+    OTP_VERSION=$(cat ${build}/.preferred_otp_version)
+fi
+ver=${OTP_VERSION:=${DEFAULT_OTP_VERSION}}
+tarball=${ver}.tgz
+OTP_TARBALL_URL="https://s3.amazonaws.com/heroku-buildpack-erlang/${tarball}"
+ERLROOT=${build}/otp
+PROFILE=${HOME}/.profile.d
 
-sh ${build}/heroku_compile ${build} ${cache}
+echo "-----> Using Erlang/OTP $ver"
+
+(
+    set -e
+
+    # Already cached?
+    test -f ${cache}/${tarball} && exit
+
+    rm -rf ${cache}/* # be sure not to build up cruft
+    cd ${cache}
+    echo "-------> Fetching Erlang/OTP $ver"
+    curl -sO ${OTP_TARBALL_URL} || exit 1
+)
+
+echo "-------> Unpacking Erlang/OTP $ver"
+mkdir -p ${ERLROOT}
+tar zxf ${cache}/${tarball} -C ${ERLROOT} --strip-components=2
+echo "-------> Installing Erlang/OTP $ver"
+ln -s ${ERLROOT} /app/otp
+${ERLROOT}/Install -minimal /app/otp
+
+PATH=/app/otp/bin:$bpdir/opt:$build/bin:$PATH
+CPATH=$build/.root/usr/include/security:$build/.root/usr/include
+export PATH
+export CPATH
+
+install_deps
+
+echo "---- FIND ----"
+
+find $build -name "pam_appl.h" -type f
+
+cd $build
+
+libvsn=$(<vsn)
+prepare_lib_versions $build $libvsn
+
+if [ ! -e "rebar" ]; then
+  echo "-----> Installing Rebar from buildpack"
+  cp ${bpdir}/opt/rebar ./
+fi
+
+echo "-----> Building with Rebar"
+unset GIT_DIR
+make compile release 2>&1 | sed -u 's/^/       /'
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+  echo "-----> Build failed"
+  exit 1
+fi
+mv $build/.root /tmp/fakerootsave
+make generate 2>&1 | sed -u 's/^/       /'
+if [ ${PIPESTATUS[0]} -ne 0 ]; then
+  echo "-----> Build failed"
+  exit 1
+fi
+mv /tmp/fakerootsave $build/.root
+echo "-----> Generation done"
+
+current=`./exorel current`
+EXODM_DIR=`pwd` ./rel/lib/exodm_${current}/ctl install
+echo "-----> Installation done"
+
+if [ -f ${bpdir}/opt/otp.sh ]; then
+  mkdir -p ${PROFILE}
+  cp ${bpdir}/opt/otp.sh ${PROFILE}
+fi
+
+rm -rf bin/ deps/ ebin/ src/ lib/ priv/ scripts/ test/ util/
+echo "-----> Cleanup done"
+
+mv "${build}" "${original_build}"
+echo "-----> Build succeeded"
