@@ -109,6 +109,7 @@ mv /tmp/fakerootsave $build/.root
 echo "-----> Generation done"
 
 current=`./exorel current`
+mv "${build}" "${original_build}"
 EXODM_DIR=`pwd` ./rel/lib/exodm_${current}/ctl install
 echo "-----> Installation done"
 
@@ -117,8 +118,7 @@ if [ -f ${bpdir}/opt/otp.sh ]; then
   cp ${bpdir}/opt/otp.sh ${PROFILE}
 fi
 
-rm -rf bin/ deps/ ebin/ src/ lib/ priv/ scripts/ test/ util/
+rm -rf bin/ deps/ ebin/ src/ lib/ priv/ scripts/ test/ util/ .exodm_env
 echo "-----> Cleanup done"
 
-mv "${build}" "${original_build}"
 echo "-----> Build succeeded"
